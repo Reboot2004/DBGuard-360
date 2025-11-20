@@ -50,7 +50,8 @@ python classify_queries.py
 
 This will:
 - ✅ Analyze all queries in `logs/pending/`
-- ✅ Detect SQL injection, malicious patterns, suspicious behavior
+- ✅ Detect SQL injection and malicious patterns using expert rules
+- ✅ Binary classification: CLEAN or MALICIOUS
 - ✅ Move clean queries to `logs/archive/`
 - ✅ Move malicious queries to `logs/malicious/`
 - ✅ Add classification tags to each query
@@ -63,9 +64,9 @@ python view_logs_gui.py
 
 Features:
 - 📊 View all logged queries organized by database/table
-- 🎨 Color-coded: Blue (pending), Green (clean), Yellow (suspicious), Red (malicious)
+- 🎨 Color-coded: Blue (pending), Green (clean), Red (malicious)
 - 🔍 Filter by table name
-- 🔍 Filter by query type (Pending/Clean/Suspicious/Malicious)
+- 🔍 Filter by query type (Pending/Clean/Malicious)
 - 📝 Click any query to see full details
 - 🔄 Refresh to see new logs
 
@@ -120,23 +121,20 @@ python -m src.cli.commands status
 
 ## 🛡️ What Gets Detected?
 
-### 🚨 Malicious (High Priority)
+### 🚨 Malicious (Threat Score ≥ 10)
 - ❌ **SQL Injection**: `OR 1=1`, `OR 'a'='a'`, `UNION SELECT`
 - ❌ **File Access**: `LOAD_FILE()`, `INTO OUTFILE`, `INTO DUMPFILE`
 - ❌ **Command Execution**: `EXEC()`, stacked queries
 - ❌ **Time-based Attacks**: `SLEEP()`, `BENCHMARK()`
 - ❌ **Schema Enumeration**: `information_schema` access
+- ❌ **Obfuscation**: Excessive OR conditions, SQL comments, encoding tricks
 
-### ⚠️ Suspicious (Medium Priority)
-- ⚠️ Excessive OR conditions (> 3)
-- ⚠️ SQL comments (possible obfuscation)
-- ⚠️ String encoding (CHAR, HEX, Base64)
-- ⚠️ String concatenation tricks
-
-### ✅ Clean
-- ✅ Normal INSERT, UPDATE, DELETE with WHERE clause
+### ✅ Clean (Threat Score < 10)
+- ✅ Normal INSERT, UPDATE, DELETE with proper WHERE clause
 - ✅ Standard SELECT queries
-- ✅ Regular DDL operations
+- ✅ Regular DDL operations (CREATE, ALTER, etc.)
+- ✅ Stored procedure calls
+- ✅ Legitimate transactions
 
 ---
 

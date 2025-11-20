@@ -120,7 +120,6 @@ class QueryClassifier:
         self.stats = {
             'total': 0,
             'clean': 0,
-            'suspicious': 0,
             'malicious': 0
         }
     
@@ -198,14 +197,13 @@ class QueryClassifier:
         
         return features
     
-    def classify(self, query: str) -> Tuple[str, int, List[str]]:
+    def classify(self, query: str) -> Tuple[str, List[str]]:
         """
         Classify query using expert rules.
         
         Returns:
-            (classification, confidence, reasons)
-            classification: "CLEAN", "SUSPICIOUS", "MALICIOUS"
-            confidence: 0-100
+            (classification, reasons)
+            classification: "CLEAN" or "MALICIOUS"
             reasons: List of threat indicators found
         """
         features = self.extract_features(query)
@@ -238,31 +236,26 @@ class QueryClassifier:
         if features.has_concat:
             reasons.append("String concatenation (evasion technique)")
         
-        # Classify based on score
-        if score >= 20:
+        # Binary classification: CLEAN or MALICIOUS
+        # Threshold: score >= 10 is considered malicious
+        if score >= 10:
             classification = "MALICIOUS"
-            confidence = min(50 + score, 100)  # 50-100% confidence
-        elif score >= 10:
-            classification = "SUSPICIOUS"
-            confidence = 40 + score  # 40-60% confidence
         else:
             classification = "CLEAN"
-            confidence = max(95 - score * 5, 50)  # 50-95% confidence
         
         self.stats['total'] += 1
         self.stats[classification.lower()] += 1
         
-        return classification, confidence, reasons
+        return classification, reasons
     
-    def format_classification(self, query: str, classification: str, confidence: int, reasons: List[str]) -> str:
+    def format_classification(self, query: str, classification: str, reasons: List[str]) -> str:
         """Format classification result for display."""
         emoji_map = {
             'CLEAN': '✅',
-            'SUSPICIOUS': '⚠️',
             'MALICIOUS': '🚨'
         }
         
-        result = f"{emoji_map[classification]} {classification} ({confidence}%) {query[:100]}"
+        result = f"{emoji_map[classification]} {classification} {query[:100]}"
         if reasons:
             for reason in reasons:
                 result += f"\n   └─ {reason}"
@@ -280,8 +273,8 @@ def classify_pending_logs(pending_dir: str = "logs/pending",
     
     classifier = QueryClassifier()
     
-    # Process all pending files
-    pending_files = list(Path(pending_dir).glob("*.log"))
+    # Process all pending files (.raw extension)
+    pending_files = list(Path(pending_dir).glob("*.raw"))
     
     if not pending_files:
         print(f"No pending log files found in {pending_dir}")
@@ -296,7 +289,6 @@ def classify_pending_logs(pending_dir: str = "logs/pending",
             lines = f.readlines()
         
         classified_lines = []
-        suspicious_count = 0
         malicious_count = 0
         
         for line in lines:
@@ -305,26 +297,20 @@ def classify_pending_logs(pending_dir: str = "logs/pending",
                 continue
             
             query = parts[4]
-            classification, confidence, reasons = classifier.classify(query)
+            classification, reasons = classifier.classify(query)
             
-            # Add classification tag to line
-            classified_line = f"{line.rstrip()}|{classification}|{confidence}\n"
+            # Add classification tag to line (binary: CLEAN or MALICIOUS)
+            classified_line = f"{line.rstrip()}|{classification}\n"
             classified_lines.append(classified_line)
             
-            if classification == "SUSPICIOUS":
-                suspicious_count += 1
-                print(f"  {classifier.format_classification(query, classification, confidence, reasons)}")
-            elif classification == "MALICIOUS":
+            if classification == "MALICIOUS":
                 malicious_count += 1
-                print(f"  {classifier.format_classification(query, classification, confidence, reasons)}")
+                print(f"  {classifier.format_classification(query, classification, reasons)}")
         
-        # Determine destination
+        # Determine destination (binary: archive for CLEAN, malicious for threats)
         if malicious_count > 0:
             dest_dir = malicious_dir
             status = f"🚨 MALICIOUS ({malicious_count} threats)"
-        elif suspicious_count > 0:
-            dest_dir = archive_dir
-            status = f"⚠️ SUSPICIOUS ({suspicious_count} warnings)"
         else:
             dest_dir = archive_dir
             status = "✅ CLEAN"
@@ -344,7 +330,6 @@ def classify_pending_logs(pending_dir: str = "logs/pending",
     print(f"Classification Summary:")
     print(f"  Total queries: {classifier.stats['total']}")
     print(f"  ✅ Clean: {classifier.stats['clean']}")
-    print(f"  ⚠️ Suspicious: {classifier.stats['suspicious']}")
     print(f"  🚨 Malicious: {classifier.stats['malicious']}")
     print("=" * 60)
 
