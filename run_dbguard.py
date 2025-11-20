@@ -52,6 +52,7 @@ def main():
         cursor = conn.cursor()
         cursor.execute("SHOW TABLES")
         tables = cursor.fetchall()
+        cursor.close()  # Close cursor after fetching results
         
         if tables:
             print(f"📊 Found {len(tables)} tables in database '{database_name}':")
@@ -62,7 +63,9 @@ def main():
             first_table = tables[0][0]
             print(f"\n--- Example: Protected Transaction on '{first_table}' ---")
             conn.execute("START TRANSACTION")
-            conn.execute(f"SELECT * FROM {first_table} LIMIT 5")
+            result_cursor = conn.execute(f"SELECT * FROM {first_table} LIMIT 5")
+            result_cursor.fetchall()  # Consume the results
+            result_cursor.close()  # Close the cursor
             conn.execute("COMMIT")
             
             print("\n✅ Transaction completed and logged")
