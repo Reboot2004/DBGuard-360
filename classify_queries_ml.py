@@ -138,13 +138,35 @@ class LocalMLClassifier:
         """
         query_upper = query.strip().upper()
         
-        # SAFE patterns (explicitly clean)
+        # CHECK FOR INJECTION PATTERNS FIRST (before marking as safe)
+        injection_patterns = [
+            (r'(OR|AND)\s+[\'"]?\d+[\'"]?\s*=\s*[\'"]?\d+[\'"]?', 'SQL injection: OR/AND 1=1 pattern', 0.95),
+            (r'(OR|AND)\s+TRUE', 'SQL injection: OR TRUE pattern', 0.90),
+            (r"'\s*(OR|AND)\s*'", "SQL injection: ' OR ' pattern", 0.90),
+            (r"''\s*(OR|AND)\s*''", "SQL injection: '' OR '' pattern", 0.88),
+            (r';\s*(DROP|DELETE|UPDATE|INSERT)', 'SQL injection: stacked queries', 0.95),
+            (r'UNION\s+(ALL\s+)?SELECT', 'SQL injection: UNION SELECT', 0.85),
+            (r'--\s*$', 'SQL injection: comment terminator', 0.70),
+            (r"'\s*;\s*--", "SQL injection: '; -- pattern", 0.92),
+            (r'SLEEP\s*\(|BENCHMARK\s*\(', 'SQL injection: time-based blind', 0.90),
+            (r'WAITFOR\s+DELAY', 'SQL injection: time-based (MSSQL)', 0.90),
+        ]
+        
+        for pattern, reason, confidence in injection_patterns:
+            if re.search(pattern, query_upper, re.IGNORECASE):
+                return {
+                    'classification': 'MALICIOUS',
+                    'reason': reason,
+                    'confidence': confidence
+                }
+        
+        # SAFE patterns (explicitly clean) - only if no injection detected
         safe_patterns = [
-            (r'^SELECT\s+\*?\s+FROM\s+\w+\s+WHERE', 'SELECT with WHERE'),
-            (r'^SELECT\s+[\w,\s*]+\s+FROM', 'SELECT query'),
+            (r'^SELECT\s+[\w,\s*]+\s+FROM\s+\w+\s+WHERE\s+\w+\s*=', 'SELECT with proper WHERE'),
+            (r'^SELECT\s+[\w,\s*]+\s+FROM\s+\w+\s*$', 'Simple SELECT query'),
             (r'^INSERT\s+INTO\s+\w+\s+(VALUES|\()', 'INSERT statement'),
-            (r'^UPDATE\s+\w+\s+SET\s+.+\s+WHERE\s+\w+', 'UPDATE with WHERE'),
-            (r'^DELETE\s+FROM\s+\w+\s+WHERE\s+\w+', 'DELETE with WHERE'),
+            (r'^UPDATE\s+\w+\s+SET\s+.+\s+WHERE\s+\w+\s*=', 'UPDATE with specific WHERE'),
+            (r'^DELETE\s+FROM\s+\w+\s+WHERE\s+\w+\s*=', 'DELETE with specific WHERE'),
             (r'^CREATE\s+(TABLE|INDEX)', 'CREATE statement'),
             (r'^ALTER\s+TABLE\s+\w+\s+ADD', 'ALTER TABLE ADD'),
             (r'^SHOW\s+(TABLES|DATABASES|COLUMNS)', 'SHOW statement'),
@@ -183,17 +205,14 @@ class LocalMLClassifier:
         
         # SUSPICIOUS patterns (medium confidence)
         suspicious_patterns = [
-            (r'WHERE\s+1\s*=\s*1', 'WHERE 1=1 (mass operation)', 0.75),
-            (r'WHERE\s+TRUE\s*($|;)', 'WHERE TRUE (mass operation)', 0.75),
             (r'DELETE\s+FROM\s+\w+\s*$', 'DELETE without WHERE', 0.70),
             (r'DROP\s+TABLE\s+IF\s+EXISTS', 'DROP TABLE IF EXISTS', 0.50),  # Lower - often legitimate
             (r'DROP\s+TEMPORARY', 'DROP TEMPORARY', 0.40),  # Lower - often legitimate
             (r'ALTER\s+USER\s+.+\s+PASSWORD', 'Password change', 0.65),
             (r'CREATE\s+USER', 'User creation', 0.50),
             (r'--\s*DROP|/\*.*DROP.*\*/', 'Commented DROP (obfuscation)', 0.80),
-            (r'UNION\s+SELECT', 'UNION SELECT (check for injection)', 0.60),
-            (r';\s*DROP\s+TABLE', 'Stacked query with DROP', 0.85),
-            (r"'.*OR.*'.*=.*'", 'SQL injection pattern', 0.75),
+            (r'CONCAT\s*\(.*SELECT', 'Potential SQL injection (nested)', 0.70),
+            (r'EXEC\s*\(|EXECUTE\s*\(', 'Dynamic SQL execution', 0.65),
         ]
         
         for pattern, reason, confidence in suspicious_patterns:
