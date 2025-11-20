@@ -68,7 +68,18 @@ class LocalMLClassifier:
             dict: {classification, reason, confidence}
         """
         try:
-            # Define candidate labels
+            # First check with rules (more reliable for known patterns)
+            rule_result = self.rule_based_classify(query)
+            
+            # If rules say it's dangerous, trust them
+            if rule_result['classification'] != 'CLEAN' and rule_result['confidence'] > 0.7:
+                return rule_result
+            
+            # If rules say it's clean with high confidence, trust them
+            if rule_result['classification'] == 'CLEAN' and rule_result['confidence'] > 0.85:
+                return rule_result
+            
+            # For uncertain cases, use ML as second opinion
             candidate_labels = [
                 "safe database query",
                 "suspicious database operation",
@@ -84,7 +95,11 @@ class LocalMLClassifier:
             
             # Get top prediction
             top_label = result['labels'][0]
-            confidence = result['scores'][0]
+            ml_confidence = result['scores'][0]
+            
+            # Only trust ML if confidence is high (>70%)
+            if ml_confidence < 0.70:
+                return rule_result  # Fall back to rules
             
             # Map to classification
             if 'malicious' in top_label:
@@ -94,16 +109,17 @@ class LocalMLClassifier:
             else:
                 classification = 'CLEAN'
             
-            # If confidence is low, apply rules as well
-            if confidence < 0.6:
-                rule_result = self.rule_based_classify(query)
-                if rule_result['classification'] != 'CLEAN':
-                    return rule_result
+            # Combine ML and rules - if they disagree, be cautious
+            if classification != rule_result['classification']:
+                # If ML says malicious but rules say clean, check confidence
+                if classification == 'MALICIOUS' and rule_result['classification'] == 'CLEAN':
+                    if ml_confidence < 0.85:  # Not confident enough
+                        return rule_result
             
             return {
                 'classification': classification,
-                'reason': f'ML prediction: {top_label}',
-                'confidence': confidence
+                'reason': f'ML + Rules: {top_label}',
+                'confidence': ml_confidence
             }
             
         except Exception as e:
@@ -122,12 +138,36 @@ class LocalMLClassifier:
         """
         query_upper = query.strip().upper()
         
+        # SAFE patterns (explicitly clean)
+        safe_patterns = [
+            (r'^SELECT\s+\*?\s+FROM\s+\w+\s+WHERE', 'SELECT with WHERE'),
+            (r'^SELECT\s+[\w,\s*]+\s+FROM', 'SELECT query'),
+            (r'^INSERT\s+INTO\s+\w+\s+(VALUES|\()', 'INSERT statement'),
+            (r'^UPDATE\s+\w+\s+SET\s+.+\s+WHERE\s+\w+', 'UPDATE with WHERE'),
+            (r'^DELETE\s+FROM\s+\w+\s+WHERE\s+\w+', 'DELETE with WHERE'),
+            (r'^CREATE\s+(TABLE|INDEX)', 'CREATE statement'),
+            (r'^ALTER\s+TABLE\s+\w+\s+ADD', 'ALTER TABLE ADD'),
+            (r'^SHOW\s+(TABLES|DATABASES|COLUMNS)', 'SHOW statement'),
+            (r'^DESCRIBE\s+\w+', 'DESCRIBE statement'),
+            (r'^EXPLAIN\s+', 'EXPLAIN statement'),
+        ]
+        
+        for pattern, reason in safe_patterns:
+            if re.match(pattern, query_upper, re.IGNORECASE | re.DOTALL):
+                return {
+                    'classification': 'CLEAN',
+                    'reason': reason,
+                    'confidence': 0.90
+                }
+        
         # CRITICAL MALICIOUS patterns (high confidence)
         critical_patterns = [
-            (r'DROP\s+(TABLE|DATABASE)\s+\w+\s*;', 'DROP without WHERE/CASCADE', 0.98),
+            (r'DROP\s+(TABLE|DATABASE)\s+\w+\s*;?\s*$', 'DROP statement without safeguards', 0.98),
             (r'TRUNCATE\s+TABLE', 'TRUNCATE TABLE (data loss)', 0.95),
-            (r'DELETE\s+FROM\s+\w+\s*;', 'DELETE entire table (no WHERE)', 0.95),
-            (r'UPDATE\s+\w+\s+SET\s+[^W]*;', 'UPDATE entire table (no WHERE)', 0.90),
+            (r'DELETE\s+FROM\s+\w+\s*;?\s*$', 'DELETE entire table (no WHERE)', 0.95),
+            (r'DELETE\s+FROM\s+\w+\s+WHERE\s+1\s*=\s*1', 'DELETE with WHERE 1=1', 0.95),
+            (r'UPDATE\s+\w+\s+SET\s+[^W]+;?\s*$', 'UPDATE entire table (no WHERE)', 0.90),
+            (r'UPDATE\s+\w+\s+SET\s+.+\s+WHERE\s+1\s*=\s*1', 'UPDATE with WHERE 1=1', 0.92),
             (r'GRANT\s+ALL\s+PRIVILEGES', 'Privilege escalation', 0.95),
             (r'INTO\s+OUTFILE', 'Data exfiltration attempt', 0.93),
             (r'LOAD\s+DATA\s+INFILE', 'File system access', 0.90),
@@ -144,14 +184,16 @@ class LocalMLClassifier:
         # SUSPICIOUS patterns (medium confidence)
         suspicious_patterns = [
             (r'WHERE\s+1\s*=\s*1', 'WHERE 1=1 (mass operation)', 0.75),
-            (r'WHERE\s+TRUE', 'WHERE TRUE (mass operation)', 0.75),
-            (r'DELETE\s+FROM', 'DELETE statement (check WHERE clause)', 0.65),
-            (r'DROP\s+', 'DROP statement', 0.70),
-            (r'ALTER\s+(USER|TABLE)', 'Schema/user modification', 0.65),
-            (r'CREATE\s+USER', 'User creation', 0.60),
+            (r'WHERE\s+TRUE\s*($|;)', 'WHERE TRUE (mass operation)', 0.75),
+            (r'DELETE\s+FROM\s+\w+\s*$', 'DELETE without WHERE', 0.70),
+            (r'DROP\s+TABLE\s+IF\s+EXISTS', 'DROP TABLE IF EXISTS', 0.50),  # Lower - often legitimate
+            (r'DROP\s+TEMPORARY', 'DROP TEMPORARY', 0.40),  # Lower - often legitimate
+            (r'ALTER\s+USER\s+.+\s+PASSWORD', 'Password change', 0.65),
+            (r'CREATE\s+USER', 'User creation', 0.50),
             (r'--\s*DROP|/\*.*DROP.*\*/', 'Commented DROP (obfuscation)', 0.80),
-            (r'UNION\s+SELECT', 'UNION SELECT (possible injection)', 0.70),
-            (r';\s*DROP', 'Stacked query with DROP', 0.85),
+            (r'UNION\s+SELECT', 'UNION SELECT (check for injection)', 0.60),
+            (r';\s*DROP\s+TABLE', 'Stacked query with DROP', 0.85),
+            (r"'.*OR.*'.*=.*'", 'SQL injection pattern', 0.75),
         ]
         
         for pattern, reason, confidence in suspicious_patterns:
@@ -160,15 +202,6 @@ class LocalMLClassifier:
                     'classification': 'SUSPICIOUS',
                     'reason': reason,
                     'confidence': confidence
-                }
-        
-        # Check for proper WHERE clauses in DML
-        if re.search(r'(DELETE|UPDATE)\s+', query_upper):
-            if not re.search(r'WHERE\s+\w+', query_upper):
-                return {
-                    'classification': 'SUSPICIOUS',
-                    'reason': 'DML without WHERE clause',
-                    'confidence': 0.85
                 }
         
         # Default: CLEAN
