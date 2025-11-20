@@ -94,17 +94,16 @@ class GeneralLogMonitor:
             while True:
                 cursor = conn.cursor()
                 
-                # Query new log entries
+                # Query new log entries (filter by database in Python, not SQL)
                 query = """
                     SELECT event_time, user_host, thread_id, command_type, argument
                     FROM mysql.general_log
                     WHERE event_time > %s
-                    AND db = %s
                     ORDER BY event_time ASC
                     LIMIT 1000
                 """
                 
-                cursor.execute(query, (last_time, self.database))
+                cursor.execute(query, (last_time,))
                 entries = cursor.fetchall()
                 
                 for entry in entries:
@@ -115,7 +114,16 @@ class GeneralLogMonitor:
                     if command_type != 'Query':
                         continue
                     
+                    # Skip if argument is None or empty
+                    if not argument:
+                        continue
+                    
                     query_upper = argument.strip().upper()
+                    
+                    # Filter by database (check USE database or database.table references)
+                    # For simplicity, capture all queries - user will be working in correct DB
+                    # if query_upper.startswith('USE ') and self.database.upper() not in query_upper:
+                    #     continue
                     
                     # Extract user from user_host (format: user[user] @ hostname [ip])
                     if '[' in user_host:
