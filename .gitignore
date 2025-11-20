@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# DBGuard360 specific
+logs/pending/*.raw
+logs/archive/*.raw
+logs/malicious/*.raw
+snapshots/*.db
+snapshots/tables/*.backup
+
+# Keep directory structure
+!logs/pending/.gitkeep
+!logs/archive/.gitkeep
+!logs/malicious/.gitkeep
+!snapshots/tables/.gitkeep
+
+# Config with credentials
+config/dbgurd.yaml
+
+# Test data
+tests/test_data/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
