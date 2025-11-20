@@ -1,19 +1,18 @@
 # DBGuard360 - Quick Start Guide
 
-## 🚀 New Workflow (Without IBD Backups)
+## 🚀 Complete Monitoring Workflow
 
 ### Step 1: Start Monitoring
 Run the monitoring script in one terminal:
 ```bash
-python monitor_dbguard.py testdb
+python monitor_general_log.py
 ```
 
 This will:
-- ✅ Start continuous monitoring
-- ✅ Log all queries to `logs/pending/`
-- ✅ Auto-process and detect malicious queries
-- ✅ Move logs to `logs/archive/` (clean) or `logs/malicious/` (suspicious)
-- ❌ NO IBD backups (removed due to permission issues)
+- ✅ Start continuous monitoring of MySQL general_log
+- ✅ Capture queries from ANY MySQL client (CLI, GUI, apps)
+- ✅ Log raw queries to `logs/pending/`
+- ✅ Filter out ghost queries from monitoring itself
 
 ### Step 2: Setup MySQL Client
 Open another terminal and use MySQL CLI:
@@ -43,7 +42,20 @@ COMMIT;  -- This triggers logging
 
 The monitoring script will automatically log and analyze the queries!
 
-### Step 4: View Logs in GUI
+### Step 4: Classify Queries
+Run the classification script to analyze pending logs:
+```bash
+python classify_queries.py
+```
+
+This will:
+- ✅ Analyze all queries in `logs/pending/`
+- ✅ Detect SQL injection, malicious patterns, suspicious behavior
+- ✅ Move clean queries to `logs/archive/`
+- ✅ Move malicious queries to `logs/malicious/`
+- ✅ Add classification tags to each query
+
+### Step 5: View Logs in GUI
 Run the GUI to browse logged queries:
 ```bash
 python view_logs_gui.py
@@ -51,9 +63,9 @@ python view_logs_gui.py
 
 Features:
 - 📊 View all logged queries organized by database/table
-- 🎨 Color-coded: Green (clean), Yellow (suspicious), Red (malicious)
+- 🎨 Color-coded: Blue (pending), Green (clean), Yellow (suspicious), Red (malicious)
 - 🔍 Filter by table name
-- 🔍 Filter by query type (Clean/Suspicious/Malicious)
+- 🔍 Filter by query type (Pending/Clean/Suspicious/Malicious)
 - 📝 Click any query to see full details
 - 🔄 Refresh to see new logs
 
@@ -63,26 +75,32 @@ Features:
 
 ```
 DBGuard360/
-├── monitor_dbguard.py        # Main monitoring script (leave running)
+├── monitor_general_log.py     # Main monitoring script (leave running)
+├── classify_queries.py        # Expert rule-based classifier
 ├── view_logs_gui.py           # GUI to view logs
-├── run_dbguard.py             # Single-use test script
+├── run_dbguard.py             # Single-use test script (deprecated)
 ├── logs/
-│   ├── pending/               # Queries waiting to be processed
+│   ├── pending/               # Raw queries waiting classification
 │   ├── archive/               # Clean queries ✅
-│   └── malicious/             # Malicious queries 🚨
+│   └── malicious/             # Malicious/suspicious queries 🚨
 ```
 
 ---
 
 ## 🎯 Usage Examples
 
-### Monitor a Database
+### Complete Workflow
 ```bash
-python monitor_dbguard.py mydb
-```
+# Terminal 1: Start monitoring
+python monitor_general_log.py
 
-### View Logs
-```bash
+# Terminal 2: Use MySQL normally
+mysql -u superuser -p testdb
+
+# Terminal 3: Classify when ready
+python classify_queries.py
+
+# Terminal 4: View results
 python view_logs_gui.py
 ```
 
@@ -100,15 +118,25 @@ python -m src.cli.commands status
 
 ---
 
-## 🛡️ What Gets Detected as Malicious?
+## 🛡️ What Gets Detected?
 
-- ❌ `DROP TABLE` / `DROP DATABASE`
-- ❌ `DELETE FROM table;` (no WHERE clause)
-- ❌ `UPDATE table SET ...;` (no WHERE clause)
-- ❌ `WHERE 1=1` (mass operations)
-- ❌ `TRUNCATE TABLE`
-- ❌ `GRANT ALL PRIVILEGES`
-- ❌ `SELECT ... INTO OUTFILE` (data exfiltration)
+### 🚨 Malicious (High Priority)
+- ❌ **SQL Injection**: `OR 1=1`, `OR 'a'='a'`, `UNION SELECT`
+- ❌ **File Access**: `LOAD_FILE()`, `INTO OUTFILE`, `INTO DUMPFILE`
+- ❌ **Command Execution**: `EXEC()`, stacked queries
+- ❌ **Time-based Attacks**: `SLEEP()`, `BENCHMARK()`
+- ❌ **Schema Enumeration**: `information_schema` access
+
+### ⚠️ Suspicious (Medium Priority)
+- ⚠️ Excessive OR conditions (> 3)
+- ⚠️ SQL comments (possible obfuscation)
+- ⚠️ String encoding (CHAR, HEX, Base64)
+- ⚠️ String concatenation tricks
+
+### ✅ Clean
+- ✅ Normal INSERT, UPDATE, DELETE with WHERE clause
+- ✅ Standard SELECT queries
+- ✅ Regular DDL operations
 
 ---
 
@@ -191,14 +219,16 @@ sudo apt-get install python3-tk
 
 ## 🎓 How It Works
 
-1. **Monitoring script** connects to MySQL with protection enabled
-2. **You use MySQL normally** in another terminal/client
-3. **On COMMIT**, queries are flushed from memory to `logs/pending/`
-4. **Analyzer processes** the log file and detects malicious patterns
-5. **Logs are moved** to `archive/` (clean) or `malicious/` (suspicious)
-6. **GUI displays** all logs with color coding and filtering
+1. **Monitoring script** polls MySQL `general_log` table
+2. **You use MySQL normally** from ANY client (CLI, GUI, app)
+3. **Queries are captured** and written to `logs/pending/` in raw format
+4. **Classification script** analyzes queries using expert rule-based system
+5. **Feature extraction** detects SQL injection, malicious patterns, obfuscation
+6. **Threat scoring** assigns confidence level (0-100%)
+7. **Logs are moved** to `archive/` (clean) or `malicious/` (threats)
+8. **GUI displays** all logs with color coding and filtering
 
-**Zero overhead** during query execution - everything happens on COMMIT!
+**No code changes required** - works with existing MySQL applications!
 
 ---
 

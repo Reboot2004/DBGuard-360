@@ -1,336 +1,353 @@
+#!/usr/bin/env python3
 """
-DBGuard360 - AI Query Classifier
-Uses local LLM (Ollama) to classify queries as clean/suspicious/malicious
-Processes pending logs and moves them to appropriate directories
+DBGuard 360 - Query Classification System
+Expert rule-based classifier with feature extraction and threat scoring.
+
+Usage:
+    python classify_queries.py
 """
 
-import sys
-import json
-import shutil
-from pathlib import Path
-from datetime import datetime
-import subprocess
+import os
 import re
+from datetime import datetime
+from dataclasses import dataclass
+from typing import List, Set, Tuple
+from pathlib import Path
 
 
-class AIQueryClassifier:
-    """
-    Classify SQL queries using local LLM
-    """
+@dataclass
+class QueryFeatures:
+    """Extracted features from SQL query for classification."""
+    has_union: bool = False
+    has_or_condition: bool = False
+    has_tautology: bool = False  # e.g., 1=1, 'a'='a'
+    has_comment: bool = False
+    has_stacked_query: bool = False
+    has_sleep: bool = False
+    has_benchmark: bool = False
+    has_information_schema: bool = False
+    has_load_file: bool = False
+    has_outfile: bool = False
+    has_into_dumpfile: bool = False
+    has_exec: bool = False
+    has_base64: bool = False
+    has_char_function: bool = False
+    has_concat: bool = False
+    has_hex: bool = False
+    suspicious_where_clause: bool = False
+    excessive_or_conditions: bool = False  # > 3 OR conditions
+    quotes_mismatch: bool = False
+    
+    def threat_score(self) -> int:
+        """Calculate threat score based on features (0-100)."""
+        score = 0
+        
+        # High risk indicators (20 points each)
+        if self.has_tautology and self.has_or_condition:
+            score += 20  # Classic SQL injection pattern
+        if self.has_union:
+            score += 20  # Union-based injection
+        if self.has_stacked_query:
+            score += 20  # Command stacking
+        if self.has_load_file or self.has_outfile or self.has_into_dumpfile:
+            score += 20  # File access attempts
+        
+        # Medium risk indicators (10 points each)
+        if self.has_sleep or self.has_benchmark:
+            score += 10  # Time-based injection
+        if self.has_information_schema:
+            score += 10  # Schema enumeration
+        if self.has_exec:
+            score += 10  # Command execution
+        if self.excessive_or_conditions:
+            score += 10  # Suspicious logic
+        if self.has_comment:
+            score += 5   # Comment obfuscation
+        
+        # Low risk indicators (5 points each)
+        if self.has_base64 or self.has_char_function or self.has_hex:
+            score += 5   # Encoding/obfuscation
+        if self.has_concat:
+            score += 5   # String concatenation tricks
+        if self.quotes_mismatch:
+            score += 5   # Malformed syntax
+        
+        return min(score, 100)  # Cap at 100
+
+
+class QueryClassifier:
+    """Expert rule-based classifier for SQL queries."""
+    
+    # SQL Injection patterns
+    TAUTOLOGY_PATTERNS = [
+        r"(?i)\bor\s+['\"]?\w+['\"]?\s*=\s*['\"]?\w+['\"]?",  # or 'a'='a'
+        r"(?i)\bor\s+\d+\s*=\s*\d+",  # or 1=1
+        r"(?i)\band\s+['\"]?\w+['\"]?\s*=\s*['\"]?\w+['\"]?",  # and 'a'='a'
+        r"(?i)\band\s+\d+\s*=\s*\d+",  # and 1=1
+    ]
+    
+    UNION_PATTERNS = [
+        r"(?i)\bunion\s+(all\s+)?select\b",
+    ]
+    
+    COMMENT_PATTERNS = [
+        r"--",  # SQL comment
+        r"/\*.*?\*/",  # Block comment
+        r"#",  # MySQL comment
+    ]
+    
+    TIME_BASED_PATTERNS = [
+        r"(?i)\bsleep\s*\(",
+        r"(?i)\bbenchmark\s*\(",
+        r"(?i)\bwaitfor\s+delay\b",
+    ]
+    
+    FILE_ACCESS_PATTERNS = [
+        r"(?i)\bload_file\s*\(",
+        r"(?i)\binto\s+outfile\b",
+        r"(?i)\binto\s+dumpfile\b",
+    ]
+    
+    OBFUSCATION_PATTERNS = [
+        r"(?i)\bchar\s*\(",
+        r"(?i)\bconcat\s*\(",
+        r"(?i)\bhex\s*\(",
+        r"(?i)\b0x[0-9a-f]+",  # Hex literals
+        r"(?i)\bbase64\b",
+    ]
     
     def __init__(self):
-        self.pending_dir = Path("logs/pending")
-        self.archive_dir = Path("logs/archive")
-        self.malicious_dir = Path("logs/malicious")
-        
-        # Create directories
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
-        self.malicious_dir.mkdir(parents=True, exist_ok=True)
-        
-        # System prompt for classification
-        self.system_prompt = """You are a SQL security expert analyzing database queries for malicious behavior.
-
-Classify each query as one of:
-- CLEAN: Normal, safe query
-- SUSPICIOUS: Potentially dangerous but might be legitimate
-- MALICIOUS: Clearly malicious or dangerous
-
-Focus on patterns like:
-- DROP, TRUNCATE without proper WHERE clauses
-- DELETE/UPDATE without WHERE or with WHERE 1=1
-- Data exfiltration (INTO OUTFILE, LOAD DATA)
-- Privilege escalation (GRANT ALL, CREATE USER)
-- SQL injection patterns
-- Mass operations on entire tables
-
-Respond ONLY with valid JSON in this exact format:
-{"classification": "CLEAN|SUSPICIOUS|MALICIOUS", "reason": "brief reason", "confidence": 0.0-1.0}"""
-    
-    def check_ollama(self):
-        """Check if Ollama is installed and running"""
-        try:
-            result = subprocess.run(['ollama', 'list'], 
-                                  capture_output=True, 
-                                  text=True, 
-                                  timeout=5)
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-    
-    def classify_query_with_llm(self, query):
-        """
-        Classify a single query using local LLM
-        
-        Args:
-            query: SQL query string
-            
-        Returns:
-            dict: {classification, reason, confidence}
-        """
-        try:
-            # Prepare prompt
-            user_prompt = f"Analyze this SQL query:\n\n{query}\n\nProvide classification as JSON."
-            
-            # Call Ollama with llama3.2 or mistral
-            cmd = [
-                'ollama', 'run', 'llama3.2',
-                '--format', 'json',
-                user_prompt
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                input=self.system_prompt + "\n\n" + user_prompt
-            )
-            
-            if result.returncode != 0:
-                return self.fallback_classify(query)
-            
-            # Parse JSON response
-            try:
-                response = json.loads(result.stdout.strip())
-                
-                # Validate response
-                if 'classification' in response:
-                    classification = response['classification'].upper()
-                    if classification not in ['CLEAN', 'SUSPICIOUS', 'MALICIOUS']:
-                        classification = self.fallback_classify(query)['classification']
-                    
-                    return {
-                        'classification': classification,
-                        'reason': response.get('reason', 'AI analysis'),
-                        'confidence': float(response.get('confidence', 0.8))
-                    }
-            except json.JSONDecodeError:
-                pass
-            
-            return self.fallback_classify(query)
-            
-        except Exception as e:
-            print(f"   ⚠️  LLM error: {e}, using fallback")
-            return self.fallback_classify(query)
-    
-    def fallback_classify(self, query):
-        """
-        Fallback rule-based classification if LLM fails
-        
-        Args:
-            query: SQL query string
-            
-        Returns:
-            dict: {classification, reason, confidence}
-        """
-        query_upper = query.strip().upper()
-        
-        # High-risk patterns
-        malicious_patterns = [
-            (r'DROP\s+(TABLE|DATABASE)', 'DROP statement', 0.95),
-            (r'TRUNCATE\s+TABLE', 'TRUNCATE statement', 0.9),
-            (r'DELETE\s+FROM\s+\w+\s*;', 'DELETE without WHERE', 0.9),
-            (r'UPDATE\s+\w+\s+SET\s+.*\s*;', 'UPDATE without WHERE', 0.85),
-            (r'GRANT\s+ALL', 'GRANT ALL PRIVILEGES', 0.95),
-            (r'INTO\s+OUTFILE', 'Data exfiltration', 0.9),
-        ]
-        
-        for pattern, reason, confidence in malicious_patterns:
-            if re.search(pattern, query_upper, re.IGNORECASE):
-                return {
-                    'classification': 'MALICIOUS',
-                    'reason': reason,
-                    'confidence': confidence
-                }
-        
-        # Suspicious patterns
-        suspicious_patterns = [
-            (r'WHERE\s+1\s*=\s*1', 'WHERE 1=1 pattern', 0.7),
-            (r'DELETE\s+FROM', 'DELETE statement', 0.6),
-            (r'DROP', 'DROP statement', 0.7),
-            (r'ALTER\s+USER', 'User modification', 0.6),
-        ]
-        
-        for pattern, reason, confidence in suspicious_patterns:
-            if re.search(pattern, query_upper, re.IGNORECASE):
-                return {
-                    'classification': 'SUSPICIOUS',
-                    'reason': reason,
-                    'confidence': confidence
-                }
-        
-        # Default: clean
-        return {
-            'classification': 'CLEAN',
-            'reason': 'No dangerous patterns detected',
-            'confidence': 0.8
-        }
-    
-    def process_log_file(self, log_file, use_llm=True):
-        """
-        Process a single log file
-        
-        Args:
-            log_file: Path to log file
-            use_llm: Whether to use LLM (True) or fallback (False)
-            
-        Returns:
-            dict: Statistics
-        """
-        stats = {
+        self.stats = {
+            'total': 0,
             'clean': 0,
             'suspicious': 0,
-            'malicious': 0,
-            'total': 0
+            'malicious': 0
         }
-        
-        has_malicious = False
-        has_suspicious = False
-        
-        print(f"\n📄 Processing: {log_file.name}")
-        
-        try:
-            with open(log_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            for line in lines:
-                parts = line.strip().split('|', 4)
-                if len(parts) != 5:
-                    continue
-                
-                timestamp, session, user, length, query = parts
-                stats['total'] += 1
-                
-                # Skip transaction control
-                query_upper = query.strip().upper()
-                if query_upper in ['START TRANSACTION', 'BEGIN', 'COMMIT', 'ROLLBACK']:
-                    continue
-                
-                # Classify query
-                if use_llm:
-                    result = self.classify_query_with_llm(query)
-                else:
-                    result = self.fallback_classify(query)
-                
-                classification = result['classification']
-                reason = result['reason']
-                confidence = result['confidence']
-                
-                # Update stats
-                if classification == 'MALICIOUS':
-                    stats['malicious'] += 1
-                    has_malicious = True
-                    icon = "🚨"
-                elif classification == 'SUSPICIOUS':
-                    stats['suspicious'] += 1
-                    has_suspicious = True
-                    icon = "⚠️"
-                else:
-                    stats['clean'] += 1
-                    icon = "✅"
-                
-                # Show preview
-                preview = query[:60].replace('\n', ' ')
-                print(f"   {icon} {classification:10} ({confidence:.0%}) - {preview}...")
-                if classification != 'CLEAN':
-                    print(f"      └─ {reason}")
-            
-            # Move to appropriate directory
-            if has_malicious:
-                dest = self.malicious_dir / log_file.name
-                shutil.move(str(log_file), str(dest))
-                print(f"   ➜ Moved to malicious/")
-            elif has_suspicious:
-                # You can choose to treat suspicious as malicious or archive
-                dest = self.malicious_dir / log_file.name  # or archive_dir
-                shutil.move(str(log_file), str(dest))
-                print(f"   ➜ Moved to malicious/ (suspicious)")
-            else:
-                dest = self.archive_dir / log_file.name
-                shutil.move(str(log_file), str(dest))
-                print(f"   ➜ Moved to archive/")
-        
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-        
-        return stats
     
-    def process_all_pending(self, use_llm=True):
-        """
-        Process all pending log files
+    def extract_features(self, query: str) -> QueryFeatures:
+        """Extract security-relevant features from query."""
+        features = QueryFeatures()
+        query_lower = query.lower()
         
-        Args:
-            use_llm: Whether to use LLM or fallback to rules
-        """
-        print("🛡️  DBGuard360 AI Query Classifier")
-        print("=" * 60)
+        # Check for SQL injection patterns
+        for pattern in self.TAUTOLOGY_PATTERNS:
+            if re.search(pattern, query):
+                features.has_tautology = True
+                break
         
-        if use_llm:
-            if not self.check_ollama():
-                print("⚠️  Ollama not found or not running!")
-                print("   Install: https://ollama.ai")
-                print("   Run: ollama pull llama3.2")
-                print("\n   Falling back to rule-based classification...")
-                use_llm = False
-            else:
-                print("✅ Ollama detected - using AI classification")
+        for pattern in self.UNION_PATTERNS:
+            if re.search(pattern, query):
+                features.has_union = True
+                break
+        
+        for pattern in self.COMMENT_PATTERNS:
+            if re.search(pattern, query):
+                features.has_comment = True
+                break
+        
+        for pattern in self.TIME_BASED_PATTERNS:
+            if re.search(pattern, query):
+                features.has_sleep = True
+                features.has_benchmark = True
+                break
+        
+        for pattern in self.FILE_ACCESS_PATTERNS:
+            if re.search(pattern, query):
+                if 'load_file' in query_lower:
+                    features.has_load_file = True
+                if 'outfile' in query_lower:
+                    features.has_outfile = True
+                if 'dumpfile' in query_lower:
+                    features.has_into_dumpfile = True
+                break
+        
+        for pattern in self.OBFUSCATION_PATTERNS:
+            if re.search(pattern, query):
+                if 'char(' in query_lower:
+                    features.has_char_function = True
+                if 'concat(' in query_lower:
+                    features.has_concat = True
+                if 'hex(' in query_lower or '0x' in query_lower:
+                    features.has_hex = True
+                if 'base64' in query_lower:
+                    features.has_base64 = True
+                break
+        
+        # Check for OR conditions
+        or_count = len(re.findall(r'(?i)\bor\b', query))
+        if or_count > 0:
+            features.has_or_condition = True
+        if or_count > 3:
+            features.excessive_or_conditions = True
+        
+        # Check for stacked queries
+        if ';' in query and query.strip().count(';') > 1:
+            features.has_stacked_query = True
+        
+        # Check for information_schema access
+        if 'information_schema' in query_lower:
+            features.has_information_schema = True
+        
+        # Check for exec/execute
+        if re.search(r'(?i)\bexec(ute)?\s*\(', query):
+            features.has_exec = True
+        
+        # Check WHERE clause suspicion
+        if re.search(r'(?i)\bwhere\b.*\bor\b.*[=<>]', query):
+            features.suspicious_where_clause = True
+        
+        return features
+    
+    def classify(self, query: str) -> Tuple[str, int, List[str]]:
+        """
+        Classify query using expert rules.
+        
+        Returns:
+            (classification, confidence, reasons)
+            classification: "CLEAN", "SUSPICIOUS", "MALICIOUS"
+            confidence: 0-100
+            reasons: List of threat indicators found
+        """
+        features = self.extract_features(query)
+        score = features.threat_score()
+        reasons = []
+        
+        # Build reason list
+        if features.has_tautology:
+            reasons.append("SQL tautology detected (e.g., 1=1, 'a'='a')")
+        if features.has_union:
+            reasons.append("UNION-based injection pattern")
+        if features.has_or_condition and features.has_tautology:
+            reasons.append("Classic SQL injection: OR with always-true condition")
+        if features.has_stacked_query:
+            reasons.append("Stacked query attempt")
+        if features.has_sleep or features.has_benchmark:
+            reasons.append("Time-based injection pattern")
+        if features.has_information_schema:
+            reasons.append("Schema enumeration attempt")
+        if features.has_load_file or features.has_outfile or features.has_into_dumpfile:
+            reasons.append("File system access attempt")
+        if features.has_exec:
+            reasons.append("Command execution attempt")
+        if features.excessive_or_conditions:
+            reasons.append(f"Excessive OR conditions (bypass attempt)")
+        if features.has_comment:
+            reasons.append("SQL comments (possible obfuscation)")
+        if features.has_base64 or features.has_char_function or features.has_hex:
+            reasons.append("Encoding/obfuscation detected")
+        if features.has_concat:
+            reasons.append("String concatenation (evasion technique)")
+        
+        # Classify based on score
+        if score >= 20:
+            classification = "MALICIOUS"
+            confidence = min(50 + score, 100)  # 50-100% confidence
+        elif score >= 10:
+            classification = "SUSPICIOUS"
+            confidence = 40 + score  # 40-60% confidence
         else:
-            print("📋 Using rule-based classification")
+            classification = "CLEAN"
+            confidence = max(95 - score * 5, 50)  # 50-95% confidence
         
-        print("=" * 60)
+        self.stats['total'] += 1
+        self.stats[classification.lower()] += 1
         
-        # Get all pending files
-        pending_files = list(self.pending_dir.glob("*.raw"))
-        
-        if not pending_files:
-            print("\n✅ No pending files to process!")
-            return
-        
-        print(f"\n📊 Found {len(pending_files)} pending log file(s)")
-        
-        total_stats = {
-            'clean': 0,
-            'suspicious': 0,
-            'malicious': 0,
-            'total': 0
+        return classification, confidence, reasons
+    
+    def format_classification(self, query: str, classification: str, confidence: int, reasons: List[str]) -> str:
+        """Format classification result for display."""
+        emoji_map = {
+            'CLEAN': '✅',
+            'SUSPICIOUS': '⚠️',
+            'MALICIOUS': '🚨'
         }
         
-        # Process each file
-        for log_file in pending_files:
-            stats = self.process_log_file(log_file, use_llm)
+        result = f"{emoji_map[classification]} {classification} ({confidence}%) {query[:100]}"
+        if reasons:
+            for reason in reasons:
+                result += f"\n   └─ {reason}"
+        return result
+
+
+def classify_pending_logs(pending_dir: str = "logs/pending", 
+                         archive_dir: str = "logs/archive",
+                         malicious_dir: str = "logs/malicious"):
+    """Classify all pending log files and move to appropriate directories."""
+    
+    # Ensure directories exist
+    os.makedirs(archive_dir, exist_ok=True)
+    os.makedirs(malicious_dir, exist_ok=True)
+    
+    classifier = QueryClassifier()
+    
+    # Process all pending files
+    pending_files = list(Path(pending_dir).glob("*.log"))
+    
+    if not pending_files:
+        print(f"No pending log files found in {pending_dir}")
+        return
+    
+    print(f"Processing {len(pending_files)} log files...\n")
+    
+    for log_file in sorted(pending_files):
+        print(f"📄 Processing: {log_file.name}")
+        
+        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+        
+        classified_lines = []
+        suspicious_count = 0
+        malicious_count = 0
+        
+        for line in lines:
+            parts = line.strip().split('|')
+            if len(parts) < 5:
+                continue
             
-            total_stats['clean'] += stats['clean']
-            total_stats['suspicious'] += stats['suspicious']
-            total_stats['malicious'] += stats['malicious']
-            total_stats['total'] += stats['total']
+            query = parts[4]
+            classification, confidence, reasons = classifier.classify(query)
+            
+            # Add classification tag to line
+            classified_line = f"{line.rstrip()}|{classification}|{confidence}\n"
+            classified_lines.append(classified_line)
+            
+            if classification == "SUSPICIOUS":
+                suspicious_count += 1
+                print(f"  {classifier.format_classification(query, classification, confidence, reasons)}")
+            elif classification == "MALICIOUS":
+                malicious_count += 1
+                print(f"  {classifier.format_classification(query, classification, confidence, reasons)}")
         
-        # Summary
-        print("\n" + "=" * 60)
-        print("📊 CLASSIFICATION SUMMARY")
-        print("=" * 60)
-        print(f"Total queries analyzed: {total_stats['total']}")
-        print(f"✅ Clean:       {total_stats['clean']}")
-        print(f"⚠️  Suspicious:  {total_stats['suspicious']}")
-        print(f"🚨 Malicious:   {total_stats['malicious']}")
-        print("=" * 60)
+        # Determine destination
+        if malicious_count > 0:
+            dest_dir = malicious_dir
+            status = f"🚨 MALICIOUS ({malicious_count} threats)"
+        elif suspicious_count > 0:
+            dest_dir = archive_dir
+            status = f"⚠️ SUSPICIOUS ({suspicious_count} warnings)"
+        else:
+            dest_dir = archive_dir
+            status = "✅ CLEAN"
         
-        if total_stats['malicious'] > 0:
-            print(f"\n⚠️  WARNING: {total_stats['malicious']} malicious queries detected!")
-            print(f"   Check logs/malicious/ for details")
+        # Move file to destination
+        dest_path = Path(dest_dir) / log_file.name
+        with open(dest_path, 'w', encoding='utf-8') as f:
+            f.writelines(classified_lines)
         
-        print("\n💡 View results: python view_logs_gui.py")
-
-
-def main():
-    """Main entry point"""
+        # Remove original pending file
+        log_file.unlink()
+        
+        print(f"  → {status} → {dest_dir}/{log_file.name}\n")
     
-    classifier = AIQueryClassifier()
-    
-    # Check for --no-llm flag
-    use_llm = '--no-llm' not in sys.argv
-    
-    classifier.process_all_pending(use_llm=use_llm)
+    # Print summary
+    print("=" * 60)
+    print(f"Classification Summary:")
+    print(f"  Total queries: {classifier.stats['total']}")
+    print(f"  ✅ Clean: {classifier.stats['clean']}")
+    print(f"  ⚠️ Suspicious: {classifier.stats['suspicious']}")
+    print(f"  🚨 Malicious: {classifier.stats['malicious']}")
+    print("=" * 60)
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    classify_pending_logs()
