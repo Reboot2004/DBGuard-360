@@ -24,11 +24,11 @@ def main():
             print("❌ Database name is required!")
             return
     
-    # Initialize protection components
+    # Initialize protection components (NO IBD backups)
     print("🛡️  Initializing DBGuard360 protection...")
     logger = MemoryBufferedLogger()
     analyzer = ProcessAndArchiveAnalyzer()
-    first_commit = FirstCommitHandler()
+    first_commit = None  # Disabled - no IBD backups
     
     # MySQL configuration with your credentials
     mysql_config = {
