@@ -118,6 +118,10 @@ class GeneralLogMonitor:
                     if not argument:
                         continue
                     
+                    # Decode if bytes
+                    if isinstance(argument, bytes):
+                        argument = argument.decode('utf-8', errors='ignore')
+                    
                     query_upper = argument.strip().upper()
                     
                     # Filter by database (check USE database or database.table references)
