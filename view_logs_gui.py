@@ -78,20 +78,22 @@ class LogViewerGUI:
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         # Treeview
-        columns = ("Time", "Table", "Type", "Query Preview")
+        columns = ("Time", "Table", "Type", "Confidence", "Query Preview")
         self.tree = ttk.Treeview(main_frame, columns=columns, show="tree headings", height=15)
         
         self.tree.heading("#0", text="Status")
         self.tree.heading("Time", text="Time")
         self.tree.heading("Table", text="Table")
         self.tree.heading("Type", text="Type")
+        self.tree.heading("Confidence", text="Confidence")
         self.tree.heading("Query Preview", text="Query Preview")
         
         self.tree.column("#0", width=80)
         self.tree.column("Time", width=150)
-        self.tree.column("Table", width=150)
+        self.tree.column("Table", width=120)
         self.tree.column("Type", width=100)
-        self.tree.column("Query Preview", width=600)
+        self.tree.column("Confidence", width=90)
+        self.tree.column("Query Preview", width=500)
         
         # Scrollbar for treeview
         tree_scroll = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -115,33 +117,47 @@ class LogViewerGUI:
         """Load all log files"""
         self.all_queries = []
         
-        # Load pending queries (not yet processed)
-        for log_file in self.pending_dir.glob("*.raw"):
-            self.parse_log_file(log_file, is_malicious=False, is_pending=True)
+        # Load pending queries (not yet processed) - raw format without classification
+        for log_file in self.pending_dir.glob("*.log"):
+            self.parse_log_file(log_file, is_pending=True)
         
-        # Load clean queries
-        for log_file in self.archive_dir.glob("*.raw"):
-            self.parse_log_file(log_file, is_malicious=False, is_pending=False)
+        # Load classified queries from archive - contains CLEAN and SUSPICIOUS
+        for log_file in self.archive_dir.glob("*.log"):
+            self.parse_log_file(log_file, is_pending=False)
         
-        # Load malicious queries
-        for log_file in self.malicious_dir.glob("*.raw"):
-            self.parse_log_file(log_file, is_malicious=True, is_pending=False)
+        # Load malicious queries - contains MALICIOUS
+        for log_file in self.malicious_dir.glob("*.log"):
+            self.parse_log_file(log_file, is_pending=False)
         
         # Update UI
         self.update_stats()
         self.populate_table_filter()
         self.apply_filters()
     
-    def parse_log_file(self, log_file, is_malicious, is_pending=False):
+    def parse_log_file(self, log_file, is_pending=False):
         """Parse a log file and extract queries"""
         try:
             with open(log_file, 'r', encoding='utf-8') as f:
                 for line in f:
-                    parts = line.strip().split('|', 4)
-                    if len(parts) != 5:
-                        continue
+                    parts = line.strip().split('|')
                     
-                    timestamp, session, user, length, query = parts
+                    # Handle both formats: raw (5 parts) and classified (7 parts)
+                    if is_pending and len(parts) >= 5:
+                        # Pending queries: timestamp|session|user|length|query
+                        timestamp, session, user, length, query = parts[0], parts[1], parts[2], parts[3], parts[4]
+                        classification = "Pending"
+                        confidence = 0
+                    elif not is_pending and len(parts) >= 7:
+                        # Classified queries: timestamp|session|user|length|query|classification|confidence
+                        timestamp, session, user, length = parts[0], parts[1], parts[2], parts[3]
+                        query = parts[4]
+                        classification = parts[5]
+                        try:
+                            confidence = int(parts[6])
+                        except (ValueError, IndexError):
+                            confidence = 0
+                    else:
+                        continue
                     
                     # Convert timestamp from milliseconds to seconds
                     try:
@@ -152,22 +168,14 @@ class LogViewerGUI:
                     # Extract table name from query
                     table = self.extract_table_name(query)
                     
-                    # Determine if suspicious (even in clean logs)
-                    if is_pending:
-                        suspicious = self.is_suspicious(query)
-                        query_type = "Suspicious" if suspicious else "Pending"
-                    else:
-                        suspicious = self.is_suspicious(query) if not is_malicious else False
-                        query_type = "Malicious" if is_malicious else ("Suspicious" if suspicious else "Clean")
-                    
                     self.all_queries.append({
                         'timestamp': timestamp_sec,
                         'session': session,
                         'user': user,
                         'query': query,
                         'table': table,
-                        'type': query_type,
-                        'is_malicious': is_malicious
+                        'type': classification,
+                        'confidence': confidence
                     })
         except Exception as e:
             print(f"Error parsing {log_file}: {e}")
@@ -257,28 +265,32 @@ class LogViewerGUI:
         
         # Populate treeview
         for query in self.filtered_queries:
-            # Status icon
-            if query['type'] == 'Malicious':
+            # Status icon and tag based on classification
+            classification = query['type'].upper()
+            if classification == 'MALICIOUS':
                 icon = "🚨"
                 tag = "malicious"
-            elif query['type'] == 'Suspicious':
+            elif classification == 'SUSPICIOUS':
                 icon = "⚠️"
                 tag = "suspicious"
-            elif query['type'] == 'Pending':
+            elif classification == 'PENDING':
                 icon = "🔵"
                 tag = "pending"
-            else:
+            else:  # CLEAN
                 icon = "✅"
                 tag = "clean"
             
             # Format time
             time_str = datetime.fromtimestamp(query['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
             
+            # Format confidence
+            confidence_str = f"{query['confidence']}%" if query['confidence'] > 0 else "-"
+            
             # Query preview (first 80 chars)
             preview = query['query'][:80] + ("..." if len(query['query']) > 80 else "")
             
             item = self.tree.insert("", tk.END, text=icon,
-                                   values=(time_str, query['table'], query['type'], preview),
+                                   values=(time_str, query['table'], query['type'], confidence_str, preview),
                                    tags=(tag,))
         
         # Configure tags for coloring
@@ -303,17 +315,19 @@ class LogViewerGUI:
         
         # Format detail text
         time_str = datetime.fromtimestamp(query['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
+        confidence_str = f"{query['confidence']}%" if query['confidence'] > 0 else "Not classified"
         
         detail = f"""
 ╔══════════════════════════════════════════════════════════════════════════════════
 ║ QUERY DETAILS
 ╚══════════════════════════════════════════════════════════════════════════════════
 
-⏰ Time:     {time_str}
-👤 User:     {query['user']}
-🔖 Session:  {query['session']}
-📊 Table:    {query['table']}
-🏷️  Type:     {query['type']}
+⏰ Time:       {time_str}
+👤 User:       {query['user']}
+🔖 Session:    {query['session']}
+📊 Table:      {query['table']}
+🏷️  Type:       {query['type']}
+🎯 Confidence: {confidence_str}
 
 ╔══════════════════════════════════════════════════════════════════════════════════
 ║ SQL QUERY
@@ -323,10 +337,13 @@ class LogViewerGUI:
 
 """
         
-        if query['type'] == 'Malicious':
+        classification = query['type'].upper()
+        if classification == 'MALICIOUS':
             detail += "\n⚠️  WARNING: This query has been flagged as MALICIOUS!\n"
-        elif query['type'] == 'Suspicious':
+        elif classification == 'SUSPICIOUS':
             detail += "\n⚠️  CAUTION: This query shows suspicious patterns.\n"
+        elif classification == 'CLEAN':
+            detail += f"\n✅ This query appears safe (confidence: {confidence_str}).\n"
         
         self.detail_text.delete(1.0, tk.END)
         self.detail_text.insert(1.0, detail)
