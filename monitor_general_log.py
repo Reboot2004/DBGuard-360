@@ -124,6 +124,10 @@ class GeneralLogMonitor:
                     
                     query_upper = argument.strip().upper()
                     
+                    # Skip the monitor's own SELECT queries from mysql.general_log
+                    if 'MYSQL.GENERAL_LOG' in query_upper or 'SHOW VARIABLES' in query_upper or 'SET GLOBAL' in query_upper:
+                        continue
+                    
                     # Filter by database (check USE database or database.table references)
                     # For simplicity, capture all queries - user will be working in correct DB
                     # if query_upper.startswith('USE ') and self.database.upper() not in query_upper:

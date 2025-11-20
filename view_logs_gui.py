@@ -20,6 +20,7 @@ class LogViewerGUI:
         self.root.geometry("1200x800")
         
         # Paths
+        self.pending_dir = Path("logs/pending")
         self.archive_dir = Path("logs/archive")
         self.malicious_dir = Path("logs/malicious")
         
@@ -65,7 +66,7 @@ class LogViewerGUI:
         
         tk.Label(filter_frame, text="Query Type:", bg="#ecf0f1").pack(side=tk.LEFT, padx=5)
         self.type_filter = ttk.Combobox(filter_frame, width=20, 
-                                        values=["All", "Clean", "Malicious", "Suspicious"])
+                                        values=["All", "Pending", "Clean", "Malicious", "Suspicious"])
         self.type_filter.set("All")
         self.type_filter.pack(side=tk.LEFT, padx=5)
         self.type_filter.bind("<<ComboboxSelected>>", lambda e: self.apply_filters())
@@ -114,20 +115,24 @@ class LogViewerGUI:
         """Load all log files"""
         self.all_queries = []
         
+        # Load pending queries (not yet processed)
+        for log_file in self.pending_dir.glob("*.raw"):
+            self.parse_log_file(log_file, is_malicious=False, is_pending=True)
+        
         # Load clean queries
         for log_file in self.archive_dir.glob("*.raw"):
-            self.parse_log_file(log_file, is_malicious=False)
+            self.parse_log_file(log_file, is_malicious=False, is_pending=False)
         
         # Load malicious queries
         for log_file in self.malicious_dir.glob("*.raw"):
-            self.parse_log_file(log_file, is_malicious=True)
+            self.parse_log_file(log_file, is_malicious=True, is_pending=False)
         
         # Update UI
         self.update_stats()
         self.populate_table_filter()
         self.apply_filters()
     
-    def parse_log_file(self, log_file, is_malicious):
+    def parse_log_file(self, log_file, is_malicious, is_pending=False):
         """Parse a log file and extract queries"""
         try:
             with open(log_file, 'r', encoding='utf-8') as f:
@@ -139,15 +144,21 @@ class LogViewerGUI:
                     timestamp, session, user, length, query = parts
                     
                     # Convert timestamp from milliseconds to seconds
-                    timestamp_sec = int(timestamp) / 1000.0
+                    try:
+                        timestamp_sec = int(timestamp) / 1000.0
+                    except (ValueError, TypeError):
+                        timestamp_sec = 0
                     
                     # Extract table name from query
                     table = self.extract_table_name(query)
                     
                     # Determine if suspicious (even in clean logs)
-                    suspicious = self.is_suspicious(query) if not is_malicious else False
-                    
-                    query_type = "Malicious" if is_malicious else ("Suspicious" if suspicious else "Clean")
+                    if is_pending:
+                        suspicious = self.is_suspicious(query)
+                        query_type = "Suspicious" if suspicious else "Pending"
+                    else:
+                        suspicious = self.is_suspicious(query) if not is_malicious else False
+                        query_type = "Malicious" if is_malicious else ("Suspicious" if suspicious else "Clean")
                     
                     self.all_queries.append({
                         'timestamp': timestamp_sec,
@@ -204,11 +215,12 @@ class LogViewerGUI:
     def update_stats(self):
         """Update statistics bar"""
         total = len(self.all_queries)
+        pending = sum(1 for q in self.all_queries if q['type'] == 'Pending')
         clean = sum(1 for q in self.all_queries if q['type'] == 'Clean')
         suspicious = sum(1 for q in self.all_queries if q['type'] == 'Suspicious')
         malicious = sum(1 for q in self.all_queries if q['type'] == 'Malicious')
         
-        stats_text = f"Total: {total} | ✅ Clean: {clean} | ⚠️ Suspicious: {suspicious} | 🚨 Malicious: {malicious}"
+        stats_text = f"Total: {total} | 🔵 Pending: {pending} | ✅ Clean: {clean} | ⚠️ Suspicious: {suspicious} | 🚨 Malicious: {malicious}"
         self.stats_label.config(text=stats_text)
     
     def populate_table_filter(self):
@@ -252,6 +264,9 @@ class LogViewerGUI:
             elif query['type'] == 'Suspicious':
                 icon = "⚠️"
                 tag = "suspicious"
+            elif query['type'] == 'Pending':
+                icon = "🔵"
+                tag = "pending"
             else:
                 icon = "✅"
                 tag = "clean"
@@ -267,6 +282,7 @@ class LogViewerGUI:
                                    tags=(tag,))
         
         # Configure tags for coloring
+        self.tree.tag_configure("pending", background="#e3f2fd")
         self.tree.tag_configure("clean", background=self.color_clean)
         self.tree.tag_configure("suspicious", background=self.color_suspicious)
         self.tree.tag_configure("malicious", background=self.color_malicious)
