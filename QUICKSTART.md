@@ -15,13 +15,25 @@ This will:
 - ✅ Move logs to `logs/archive/` (clean) or `logs/malicious/` (suspicious)
 - ❌ NO IBD backups (removed due to permission issues)
 
-### Step 2: Use MySQL Normally
+### Step 2: Setup MySQL Client
 Open another terminal and use MySQL CLI:
 ```bash
 mysql -u superuser -p testdb
 ```
 
-Execute your queries:
+**IMPORTANT: Disable autocommit first!**
+```sql
+-- Check current setting
+SELECT @@autocommit;
+
+-- Disable autocommit (REQUIRED!)
+SET autocommit = 0;
+
+-- Verify it's off (should show 0)
+SELECT @@autocommit;
+```
+
+### Step 3: Execute Queries with Explicit Transactions
 ```sql
 START TRANSACTION;
 INSERT INTO users VALUES (1, 'Alice');
@@ -31,7 +43,7 @@ COMMIT;  -- This triggers logging
 
 The monitoring script will automatically log and analyze the queries!
 
-### Step 3: View Logs in GUI
+### Step 4: View Logs in GUI
 Run the GUI to browse logged queries:
 ```bash
 python view_logs_gui.py
@@ -147,6 +159,21 @@ Requirements:
 ✅ **Fixed!** IBD backups are now disabled. The system only does query logging.
 
 ### Queries Not Showing Up
+**Most common issue: Autocommit is ON!**
+
+Solution:
+```sql
+SET autocommit = 0;
+```
+
+Then use explicit transactions:
+```sql
+START TRANSACTION;
+-- your queries here
+COMMIT;
+```
+
+Other checks:
 - Make sure monitoring script is running
 - Execute `COMMIT` after your queries
 - Check `logs/pending/` for new files

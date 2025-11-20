@@ -138,6 +138,9 @@ class LogViewerGUI:
                     
                     timestamp, session, user, length, query = parts
                     
+                    # Convert timestamp from milliseconds to seconds
+                    timestamp_sec = int(timestamp) / 1000.0
+                    
                     # Extract table name from query
                     table = self.extract_table_name(query)
                     
@@ -147,7 +150,7 @@ class LogViewerGUI:
                     query_type = "Malicious" if is_malicious else ("Suspicious" if suspicious else "Clean")
                     
                     self.all_queries.append({
-                        'timestamp': int(timestamp),
+                        'timestamp': timestamp_sec,
                         'session': session,
                         'user': user,
                         'query': query,
