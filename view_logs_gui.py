@@ -572,6 +572,7 @@ class LogViewerGUI:
         # Check if table exists in database with exact case
         def check_table_exists():
             try:
+                import mysql.connector
                 conn = mysql.connector.connect(
                     host='localhost',
                     user='superuser',
@@ -592,8 +593,8 @@ class LogViewerGUI:
                     if table.lower() == original_table.lower():
                         return f"⚠️ EXISTS as '{table}' (case mismatch!)"
                 return "❌ NOT FOUND in database"
-            except:
-                return "❓ Unable to check"
+            except Exception as e:
+                return f"❓ Unable to check: {str(e)}"
         
         table_status = check_table_exists()
         tk.Label(info_frame, text=f"Table (from queries): {original_table}", 
@@ -612,6 +613,7 @@ class LogViewerGUI:
         # Show existing tables button
         def show_existing_tables():
             try:
+                import mysql.connector
                 conn = mysql.connector.connect(
                     host='localhost',
                     user='superuser',
