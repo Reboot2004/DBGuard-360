@@ -112,6 +112,11 @@ class LogViewerGUI:
                  font=("Arial", 10, "bold"),
                  bg="#3498db", fg="white", padx=10, pady=5).pack(side=tk.LEFT, padx=5)
         
+        tk.Button(action_frame, text="🔍 Classify Pending Queries", 
+                 command=self.classify_pending_queries, 
+                 font=("Arial", 10),
+                 bg="#9b59b6", fg="white", padx=10, pady=5).pack(side=tk.LEFT, padx=5)
+        
         self.selection_label = tk.Label(action_frame, text="No queries selected", 
                                        font=("Arial", 9), bg="#ecf0f1")
         self.selection_label.pack(side=tk.LEFT, padx=10)
@@ -123,6 +128,87 @@ class LogViewerGUI:
         self.detail_text = scrolledtext.ScrolledText(detail_frame, height=10, 
                                                       font=("Courier", 10), wrap=tk.WORD)
         self.detail_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+    
+    def classify_pending_queries(self):
+        """Run classify_queries.py to classify pending queries"""
+        import subprocess
+        import os
+        
+        # Check if there are pending queries
+        pending_files = list(self.pending_dir.glob("*.raw"))
+        if not pending_files:
+            tk.messagebox.showinfo("No Pending Queries", 
+                                  "There are no pending queries to classify.")
+            return
+        
+        # Confirm action
+        result = tk.messagebox.askyesno(
+            "Classify Pending Queries",
+            f"Found {len(pending_files)} pending log file(s).\n\n"
+            "This will run classify_queries.py to classify all pending queries.\n\n"
+            "Continue?"
+        )
+        
+        if not result:
+            return
+        
+        try:
+            # Show progress
+            progress_window = tk.Toplevel(self.root)
+            progress_window.title("Classifying Queries")
+            progress_window.geometry("400x150")
+            progress_window.transient(self.root)
+            progress_window.grab_set()
+            
+            tk.Label(progress_window, 
+                    text="🔍 Classifying pending queries...",
+                    font=("Arial", 12, "bold")).pack(pady=20)
+            
+            progress_label = tk.Label(progress_window, 
+                                     text="Please wait...",
+                                     font=("Arial", 10))
+            progress_label.pack(pady=10)
+            
+            self.root.update()
+            
+            # Run classify_queries.py
+            script_path = os.path.join(os.path.dirname(__file__), 'classify_queries.py')
+            
+            # Use subprocess to run the script
+            process = subprocess.Popen(
+                ['python', script_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=os.path.dirname(__file__)
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            progress_window.destroy()
+            
+            if process.returncode == 0:
+                # Success - reload logs
+                self.load_logs()
+                tk.messagebox.showinfo(
+                    "Classification Complete",
+                    f"Successfully classified pending queries!\n\n"
+                    f"Output:\n{stdout[:500]}"
+                )
+            else:
+                # Error occurred
+                tk.messagebox.showerror(
+                    "Classification Failed",
+                    f"Error running classify_queries.py:\n\n{stderr[:500]}"
+                )
+        
+        except Exception as e:
+            if 'progress_window' in locals():
+                progress_window.destroy()
+            tk.messagebox.showerror(
+                "Error",
+                f"Failed to run classification:\n{str(e)}"
+            )
     
     def load_logs(self):
         """Load all log files"""
@@ -186,23 +272,24 @@ class LogViewerGUI:
             print(f"Error parsing {log_file}: {e}")
     
     def extract_table_name(self, query):
-        """Extract table name from SQL query"""
-        query_upper = query.upper()
-        
+        """Extract table name from SQL query (preserves case)"""
         # Try to find table name after FROM, INTO, UPDATE, DELETE FROM, etc.
+        # Use case-insensitive matching but extract the original case
         patterns = [
             r'FROM\s+([`\w]+)',
             r'INTO\s+([`\w]+)',
             r'UPDATE\s+([`\w]+)',
             r'JOIN\s+([`\w]+)',
             r'TABLE\s+([`\w]+)',
+            r'DELETE\s+FROM\s+([`\w]+)',
         ]
         
         for pattern in patterns:
-            match = re.search(pattern, query_upper)
+            # Search with case-insensitive flag but extract from original query
+            match = re.search(pattern, query, re.IGNORECASE)
             if match:
                 table = match.group(1).strip('`')
-                return table
+                return table  # Returns the table name with original case
         
         return "Unknown"
     
@@ -462,7 +549,7 @@ class LogViewerGUI:
         """Show dialog to input new table name and schema"""
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Run Queries on New Table")
-        dialog.geometry("700x500")
+        dialog.geometry("700x550")
         dialog.transient(self.root)
         dialog.grab_set()
         
@@ -478,13 +565,92 @@ class LogViewerGUI:
         content = tk.Frame(dialog, padx=20, pady=20)
         content.pack(fill=tk.BOTH, expand=True)
         
-        # Original table info
+        # Original table info with case warning
         info_frame = tk.LabelFrame(content, text="Original Table", font=("Arial", 10, "bold"))
         info_frame.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(info_frame, text=f"Table: {original_table}", 
-                font=("Arial", 10)).pack(anchor=tk.W, padx=10, pady=5)
+        
+        # Check if table exists in database with exact case
+        def check_table_exists():
+            try:
+                conn = mysql.connector.connect(
+                    host='localhost',
+                    user='superuser',
+                    password='Collector#123',
+                    database='testdb'
+                )
+                cursor = conn.cursor()
+                cursor.execute("SHOW TABLES")
+                tables = [row[0] for row in cursor.fetchall()]
+                cursor.close()
+                conn.close()
+                
+                # Check for exact match
+                if original_table in tables:
+                    return "✅ EXISTS (exact case)"
+                # Check for case-insensitive match
+                for table in tables:
+                    if table.lower() == original_table.lower():
+                        return f"⚠️ EXISTS as '{table}' (case mismatch!)"
+                return "❌ NOT FOUND in database"
+            except:
+                return "❓ Unable to check"
+        
+        table_status = check_table_exists()
+        tk.Label(info_frame, text=f"Table (from queries): {original_table}", 
+                font=("Arial", 10, "bold")).pack(anchor=tk.W, padx=10, pady=5)
+        tk.Label(info_frame, text=f"Status in database: {table_status}", 
+                font=("Arial", 9), fg="#27ae60" if "EXISTS (exact" in table_status else "#e67e22").pack(anchor=tk.W, padx=10, pady=2)
         tk.Label(info_frame, text=f"Selected Queries: {len(selected_queries)}", 
                 font=("Arial", 10)).pack(anchor=tk.W, padx=10, pady=5)
+        
+        # Warning about case sensitivity
+        warning_label = tk.Label(info_frame, 
+                                text="⚠️ MySQL table names are case-sensitive! Ensure exact case match.",
+                                font=("Arial", 9, "italic"), fg="#e67e22")
+        warning_label.pack(anchor=tk.W, padx=10, pady=5)
+        
+        # Show existing tables button
+        def show_existing_tables():
+            try:
+                conn = mysql.connector.connect(
+                    host='localhost',
+                    user='superuser',
+                    password='Collector#123',
+                    database='testdb'
+                )
+                cursor = conn.cursor()
+                cursor.execute("SHOW TABLES")
+                tables = [row[0] for row in cursor.fetchall()]
+                cursor.close()
+                conn.close()
+                
+                # Show in a popup
+                tables_window = tk.Toplevel(dialog)
+                tables_window.title("Existing Tables in Database")
+                tables_window.geometry("400x300")
+                
+                tk.Label(tables_window, text="Tables in 'testdb':", 
+                        font=("Arial", 11, "bold")).pack(pady=10)
+                
+                # Scrollable listbox
+                scroll = tk.Scrollbar(tables_window)
+                listbox = tk.Listbox(tables_window, yscrollcommand=scroll.set, 
+                                    font=("Consolas", 10))
+                scroll.config(command=listbox.yview)
+                scroll.pack(side=tk.RIGHT, fill=tk.Y)
+                listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+                
+                for table in sorted(tables):
+                    listbox.insert(tk.END, table)
+                
+            except Exception as e:
+                tk.messagebox.showerror("Database Error", f"Cannot fetch tables: {e}")
+        
+        btn_frame = tk.Frame(info_frame)
+        btn_frame.pack(anchor=tk.W, padx=10, pady=5)
+        tk.Button(btn_frame, text="📋 Show Existing Tables", 
+                 command=show_existing_tables,
+                 font=("Arial", 9)).pack(side=tk.LEFT)
         
         # New table name
         name_frame = tk.LabelFrame(content, text="New Table Name", font=("Arial", 10, "bold"))
@@ -560,43 +726,106 @@ class LogViewerGUI:
             cursor.execute(schema)
             conn.commit()
             
+            # Sort queries chronologically by timestamp before execution
+            sorted_queries = sorted(selected_queries, key=lambda q: q['timestamp'])
+            
             # Replace table names in queries and execute
             results = []
             errors = []
+            debug_info = []
             
-            for query_data in selected_queries:
+            debug_info.append(f"\n📅 Executing {len(sorted_queries)} queries in CHRONOLOGICAL order (by timestamp)\n")
+            
+            for query_data in sorted_queries:
                 original_query = query_data['query'].strip()
                 
                 # Skip transaction control statements
                 query_upper = original_query.upper()
                 if any(keyword in query_upper for keyword in ['START TRANSACTION', 'BEGIN', 'COMMIT', 'ROLLBACK']):
+                    debug_info.append(f"⏭️  SKIPPED: {original_query[:60]}... (transaction control)")
                     continue
                 
-                # Replace table name (handle with/without backticks)
+                # Store original for comparison
                 modified_query = original_query
                 
-                # Try different replacement patterns
+                # Method 1: Direct string replacements (case-sensitive)
                 replacements = [
                     (f"`{original_table}`", f"`{new_table}`"),
                     (f" {original_table} ", f" {new_table} "),
                     (f" {original_table};", f" {new_table};"),
                     (f" {original_table}\n", f" {new_table}\n"),
-                    (f"INTO {original_table}", f"INTO {new_table}"),
-                    (f"FROM {original_table}", f"FROM {new_table}"),
-                    (f"UPDATE {original_table}", f"UPDATE {new_table}"),
-                    (f"TABLE {original_table}", f"TABLE {new_table}"),
                 ]
                 
                 for old, new in replacements:
-                    modified_query = modified_query.replace(old, new)
+                    if old in modified_query:
+                        modified_query = modified_query.replace(old, new)
+                        debug_info.append(f"🔧 Replaced '{old}' with '{new}'")
                 
-                # Case-insensitive replacement for common patterns
-                modified_query = re.sub(
+                # Method 2: SQL keyword + table patterns (CASE-SENSITIVE to preserve exact match)
+                # First try exact case match
+                sql_patterns = [
+                    (rf'INTO\s+`?{re.escape(original_table)}`?', f'INTO {new_table}'),
+                    (rf'FROM\s+`?{re.escape(original_table)}`?', f'FROM {new_table}'),
+                    (rf'UPDATE\s+`?{re.escape(original_table)}`?', f'UPDATE {new_table}'),
+                    (rf'JOIN\s+`?{re.escape(original_table)}`?', f'JOIN {new_table}'),
+                    (rf'TABLE\s+`?{re.escape(original_table)}`?', f'TABLE {new_table}'),
+                    (rf'DELETE\s+FROM\s+`?{re.escape(original_table)}`?', f'DELETE FROM {new_table}'),
+                ]
+                
+                # Try case-sensitive first
+                for pattern, replacement in sql_patterns:
+                    new_modified = re.sub(pattern, replacement, modified_query)
+                    if new_modified != modified_query:
+                        debug_info.append(f"🔧 EXACT MATCH: Pattern '{pattern}' replaced with '{replacement}'")
+                        modified_query = new_modified
+                        break
+                
+                # If no exact match, try case-insensitive with warning
+                if modified_query == original_query:
+                    for pattern, replacement in sql_patterns:
+                        new_modified = re.sub(pattern, replacement, modified_query, flags=re.IGNORECASE)
+                        if new_modified != modified_query:
+                            debug_info.append(f"⚠️  CASE-INSENSITIVE: Pattern '{pattern}' matched (case mismatch!)")
+                            debug_info.append(f"   Original table in GUI: '{original_table}' (might be wrong case)")
+                            modified_query = new_modified
+                            break
+                
+                # Method 3: Word boundary replacement (CASE-SENSITIVE first)
+                final_modified = re.sub(
                     rf'\b{re.escape(original_table)}\b',
                     new_table,
-                    modified_query,
-                    flags=re.IGNORECASE
+                    modified_query
                 )
+                
+                if final_modified != modified_query:
+                    debug_info.append(f"🔧 Word boundary replacement applied (case-sensitive)")
+                    modified_query = final_modified
+                
+                # If still no change, try case-insensitive as last resort
+                if original_query == modified_query:
+                    final_modified_ci = re.sub(
+                        rf'\b{re.escape(original_table)}\b',
+                        new_table,
+                        modified_query,
+                        flags=re.IGNORECASE
+                    )
+                    if final_modified_ci != modified_query:
+                        debug_info.append(f"⚠️  Case-insensitive word boundary replacement applied")
+                        debug_info.append(f"   WARNING: Table name case mismatch! GUI shows '{original_table}'")
+                        modified_query = final_modified_ci
+                
+                # Add debug info about the transformation
+                debug_info.append(f"")
+                if original_query == modified_query:
+                    debug_info.append(f"❌ ERROR: No table name replacement occurred!")
+                    debug_info.append(f"   GUI extracted table: '{original_table}'")
+                    debug_info.append(f"   Original query: {original_query[:80]}")
+                    debug_info.append(f"   Check if table name case is correct!")
+                else:
+                    debug_info.append(f"✅ SUCCESS: Table name replaced")
+                    debug_info.append(f"   BEFORE: {original_query[:80]}")
+                    debug_info.append(f"   AFTER:  {modified_query[:80]}")
+                debug_info.append(f"")
                 
                 try:
                     # Execute the modified query
@@ -608,22 +837,22 @@ class LogViewerGUI:
                     conn.commit()
                     results.append(f"✅ {modified_query[:80]}... ({affected} rows affected)")
                 except Exception as e:
-                    errors.append(f"❌ {modified_query[:60]}...\n   Error: {str(e)}")
+                    errors.append(f"❌ {modified_query[:60]}...\n   Error: {str(e)}\n   Original: {original_query[:60]}")
             
             cursor.close()
             conn.close()
             
-            # Show results
-            self.show_execution_results(new_table, len(selected_queries), results, errors)
+            # Show results with debug info
+            self.show_execution_results(new_table, len(selected_queries), results, errors, debug_info)
             
         except Exception as e:
             tk.messagebox.showerror("Execution Error", f"Failed to execute queries:\n\n{str(e)}")
     
-    def show_execution_results(self, table_name, total_queries, results, errors):
+    def show_execution_results(self, table_name, total_queries, results, errors, debug_info=None):
         """Show execution results in a dialog"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Execution Results")
-        dialog.geometry("900x700")
+        dialog.geometry("1000x750")
         dialog.transient(self.root)
         
         # Header
@@ -655,10 +884,17 @@ class LogViewerGUI:
                  bg="#3498db", fg="white", font=("Arial", 9),
                  padx=10, pady=5).pack(side=tk.LEFT, padx=5)
         
-        # Results text
-        results_text = scrolledtext.ScrolledText(content, height=25, 
+        # Results text with tabs
+        notebook = ttk.Notebook(content)
+        notebook.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Tab 1: Results
+        results_frame = tk.Frame(notebook)
+        notebook.add(results_frame, text="📊 Results")
+        
+        results_text = scrolledtext.ScrolledText(results_frame, height=25, 
                                                  font=("Courier", 9), wrap=tk.WORD)
-        results_text.pack(fill=tk.BOTH, expand=True, pady=10)
+        results_text.pack(fill=tk.BOTH, expand=True)
         
         output = f"Execution Summary\n{'=' * 80}\n\n"
         
@@ -680,10 +916,28 @@ class LogViewerGUI:
         results_text.insert(1.0, output)
         results_text.config(state=tk.DISABLED)
         
+        # Tab 2: Debug Info
+        if debug_info:
+            debug_frame = tk.Frame(notebook)
+            notebook.add(debug_frame, text="🔧 Debug Log")
+            
+            debug_text = scrolledtext.ScrolledText(debug_frame, height=25, 
+                                                   font=("Courier", 9), wrap=tk.WORD)
+            debug_text.pack(fill=tk.BOTH, expand=True)
+            
+            debug_output = f"Table Name Replacement Debug Log\n{'=' * 80}\n\n"
+            debug_output += "\n".join(debug_info)
+            debug_output += f"\n\n{'=' * 80}\n"
+            debug_output += "This shows how table names were replaced in each query.\n"
+            debug_output += "If you see 'No replacement occurred', the original table name is being used!\n"
+            
+            debug_text.insert(1.0, debug_output)
+            debug_text.config(state=tk.DISABLED)
+        
         # Close button
         tk.Button(content, text="Close", command=dialog.destroy,
                  bg="#95a5a6", fg="white", font=("Arial", 10),
-                 padx=20, pady=8).pack()
+                 padx=20, pady=8).pack(pady=5)
     
     def verify_table_data(self, table_name, parent_dialog):
         """Query the table to verify data was inserted"""
