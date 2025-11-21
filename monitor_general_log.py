@@ -37,6 +37,16 @@ class GeneralLogMonitor:
         """Enable general query log to table"""
         cursor = conn.cursor()
         
+        try:
+            # Try to repair general_log table if it's crashed
+            print("🔧 Checking mysql.general_log table health...")
+            cursor.execute("REPAIR TABLE mysql.general_log")
+            result = cursor.fetchall()
+            for row in result:
+                print(f"   {row[2]}: {row[3]}")  # Msg_type: Msg_text
+        except Exception as e:
+            print(f"⚠️  Could not repair table: {e}")
+        
         # Check if general log is enabled
         cursor.execute("SHOW VARIABLES LIKE 'general_log'")
         result = cursor.fetchone()
@@ -85,8 +95,20 @@ class GeneralLogMonitor:
             
             # Get current max event_time to start from
             cursor = conn.cursor()
-            cursor.execute("SELECT MAX(event_time) FROM mysql.general_log")
-            last_time = cursor.fetchone()[0] or datetime.now()
+            try:
+                cursor.execute("SELECT MAX(event_time) FROM mysql.general_log")
+                last_time = cursor.fetchone()[0] or datetime.now()
+            except mysql.connector.errors.DatabaseError as e:
+                if "1194" in str(e):  # Table marked as crashed
+                    print("❌ ERROR: mysql.general_log table is crashed!")
+                    print("🔧 Attempting automatic repair...")
+                    cursor.execute("REPAIR TABLE mysql.general_log")
+                    result = cursor.fetchall()
+                    print("✅ Repair completed. Retrying...")
+                    cursor.execute("SELECT MAX(event_time) FROM mysql.general_log")
+                    last_time = cursor.fetchone()[0] or datetime.now()
+                else:
+                    raise
             cursor.close()
             
             transaction_count = 0

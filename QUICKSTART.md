@@ -181,8 +181,27 @@ Requirements:
 
 ## 🐛 Troubleshooting
 
-### Permission Denied for IBD Files
-✅ **Fixed!** IBD backups are now disabled. The system only does query logging.
+### Table Crashed Error (ERROR 1194)
+**Error:** `Table 'general_log' is marked as crashed and should be repaired`
+
+**Quick Fix:**
+```bash
+python repair_table.py
+```
+
+**Manual Fix:**
+```sql
+-- Login to MySQL
+mysql -u root -p
+
+-- Repair the table
+REPAIR TABLE mysql.general_log;
+
+-- Optional: Optimize for better performance
+OPTIMIZE TABLE mysql.general_log;
+```
+
+**Cause:** MySQL's general_log table can become corrupted under heavy load or unexpected shutdowns.
 
 ### Queries Not Showing Up
 **Most common issue: Autocommit is ON!**
@@ -211,6 +230,19 @@ Install tkinter:
 sudo apt-get install python3-tk
 
 # Already installed on Windows/Mac
+```
+
+### Too Many Log Files
+**Issue:** `logs/pending/` filling up with files
+
+**Solution:**
+```bash
+# Classify pending logs (moves them to archive/malicious)
+python classify_queries.py
+
+# Or manually archive old logs
+mkdir logs/old
+mv logs/pending/*.raw logs/old/
 ```
 
 ---

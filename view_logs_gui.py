@@ -549,6 +549,13 @@ class LogViewerGUI:
             )
             cursor = conn.cursor()
             
+            # Drop table if exists (for re-execution)
+            try:
+                cursor.execute(f"DROP TABLE IF EXISTS {new_table}")
+                conn.commit()
+            except:
+                pass
+            
             # Create the new table
             cursor.execute(schema)
             conn.commit()
@@ -558,15 +565,48 @@ class LogViewerGUI:
             errors = []
             
             for query_data in selected_queries:
-                original_query = query_data['query']
+                original_query = query_data['query'].strip()
                 
-                # Replace original table name with new table name
-                modified_query = original_query.replace(original_table, new_table)
+                # Skip transaction control statements
+                query_upper = original_query.upper()
+                if any(keyword in query_upper for keyword in ['START TRANSACTION', 'BEGIN', 'COMMIT', 'ROLLBACK']):
+                    continue
+                
+                # Replace table name (handle with/without backticks)
+                modified_query = original_query
+                
+                # Try different replacement patterns
+                replacements = [
+                    (f"`{original_table}`", f"`{new_table}`"),
+                    (f" {original_table} ", f" {new_table} "),
+                    (f" {original_table};", f" {new_table};"),
+                    (f" {original_table}\n", f" {new_table}\n"),
+                    (f"INTO {original_table}", f"INTO {new_table}"),
+                    (f"FROM {original_table}", f"FROM {new_table}"),
+                    (f"UPDATE {original_table}", f"UPDATE {new_table}"),
+                    (f"TABLE {original_table}", f"TABLE {new_table}"),
+                ]
+                
+                for old, new in replacements:
+                    modified_query = modified_query.replace(old, new)
+                
+                # Case-insensitive replacement for common patterns
+                modified_query = re.sub(
+                    rf'\b{re.escape(original_table)}\b',
+                    new_table,
+                    modified_query,
+                    flags=re.IGNORECASE
+                )
                 
                 try:
+                    # Execute the modified query
                     cursor.execute(modified_query)
+                    
+                    # Get affected rows
+                    affected = cursor.rowcount if cursor.rowcount >= 0 else 0
+                    
                     conn.commit()
-                    results.append(f"✅ {modified_query[:80]}...")
+                    results.append(f"✅ {modified_query[:80]}... ({affected} rows affected)")
                 except Exception as e:
                     errors.append(f"❌ {modified_query[:60]}...\n   Error: {str(e)}")
             
@@ -583,15 +623,16 @@ class LogViewerGUI:
         """Show execution results in a dialog"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Execution Results")
-        dialog.geometry("800x600")
+        dialog.geometry("900x700")
         dialog.transient(self.root)
         
         # Header
         header = tk.Frame(dialog, bg="#27ae60" if not errors else "#e67e22", height=60)
         header.pack(fill=tk.X)
         
-        status_text = f"✅ Successfully executed {len(results)} queries" if not errors else \
-                     f"⚠️ Completed with {len(errors)} error(s)"
+        success_count = len(results)
+        status_text = f"✅ Successfully executed {success_count}/{total_queries} queries" if not errors else \
+                     f"⚠️ {success_count} succeeded, {len(errors)} failed"
         
         tk.Label(header, text=status_text,
                 font=("Arial", 14, "bold"),
@@ -602,31 +643,129 @@ class LogViewerGUI:
         content = tk.Frame(dialog, padx=20, pady=20)
         content.pack(fill=tk.BOTH, expand=True)
         
-        tk.Label(content, text=f"Table: {table_name} | Total Queries: {total_queries}",
+        tk.Label(content, text=f"Table: {table_name} | Total Queries Attempted: {total_queries}",
                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
         
+        # Add verify button
+        verify_frame = tk.Frame(content)
+        verify_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Button(verify_frame, text="🔍 Verify Table Data", 
+                 command=lambda: self.verify_table_data(table_name, dialog),
+                 bg="#3498db", fg="white", font=("Arial", 9),
+                 padx=10, pady=5).pack(side=tk.LEFT, padx=5)
+        
         # Results text
-        results_text = scrolledtext.ScrolledText(content, height=20, 
+        results_text = scrolledtext.ScrolledText(content, height=25, 
                                                  font=("Courier", 9), wrap=tk.WORD)
         results_text.pack(fill=tk.BOTH, expand=True, pady=10)
         
         output = f"Execution Summary\n{'=' * 80}\n\n"
         
         if results:
-            output += f"Successful Queries ({len(results)}):\n{'-' * 80}\n"
-            output += "\n".join(results) + "\n\n"
+            output += f"✅ Successful Queries ({len(results)}):\n{'-' * 80}\n"
+            for i, result in enumerate(results, 1):
+                output += f"{i}. {result}\n"
+            output += "\n"
         
         if errors:
-            output += f"Failed Queries ({len(errors)}):\n{'-' * 80}\n"
-            output += "\n".join(errors) + "\n"
+            output += f"❌ Failed Queries ({len(errors)}):\n{'-' * 80}\n"
+            for i, error in enumerate(errors, 1):
+                output += f"{i}. {error}\n"
+            output += "\n"
+        
+        output += f"\n{'=' * 80}\n"
+        output += f"💡 Tip: Click 'Verify Table Data' to check what was actually inserted/updated\n"
         
         results_text.insert(1.0, output)
         results_text.config(state=tk.DISABLED)
         
         # Close button
         tk.Button(content, text="Close", command=dialog.destroy,
-                 bg="#3498db", fg="white", font=("Arial", 10),
+                 bg="#95a5a6", fg="white", font=("Arial", 10),
                  padx=20, pady=8).pack()
+    
+    def verify_table_data(self, table_name, parent_dialog):
+        """Query the table to verify data was inserted"""
+        import mysql.connector
+        
+        try:
+            conn = mysql.connector.connect(
+                host='localhost',
+                user='superuser',
+                password='Collector#123',
+                database='testdb'
+            )
+            cursor = conn.cursor()
+            
+            # Get table structure
+            cursor.execute(f"DESCRIBE {table_name}")
+            columns = cursor.fetchall()
+            
+            # Get table data
+            cursor.execute(f"SELECT * FROM {table_name} LIMIT 100")
+            rows = cursor.fetchall()
+            
+            cursor.close()
+            conn.close()
+            
+            # Show in new dialog
+            verify_dialog = tk.Toplevel(parent_dialog)
+            verify_dialog.title(f"Table Data: {table_name}")
+            verify_dialog.geometry("900x600")
+            verify_dialog.transient(parent_dialog)
+            
+            # Header
+            header = tk.Frame(verify_dialog, bg="#3498db", height=50)
+            header.pack(fill=tk.X)
+            tk.Label(header, text=f"📊 Table: {table_name} ({len(rows)} rows)",
+                    font=("Arial", 12, "bold"),
+                    bg="#3498db", fg="white").pack(pady=10)
+            
+            # Content
+            content = tk.Frame(verify_dialog, padx=20, pady=20)
+            content.pack(fill=tk.BOTH, expand=True)
+            
+            # Data text
+            data_text = scrolledtext.ScrolledText(content, height=30, 
+                                                   font=("Courier", 9), wrap=tk.NONE)
+            data_text.pack(fill=tk.BOTH, expand=True)
+            
+            # Format output
+            output = f"Table Structure:\n{'=' * 80}\n"
+            for col in columns:
+                output += f"  {col[0]:20} {col[1]:20} {col[2]:5} {col[3]:5}\n"
+            
+            output += f"\nTable Data ({len(rows)} rows):\n{'=' * 80}\n"
+            
+            if rows:
+                # Column headers
+                col_names = [col[0] for col in columns]
+                output += " | ".join(f"{name:20}" for name in col_names) + "\n"
+                output += "-" * 80 + "\n"
+                
+                # Data rows
+                for row in rows:
+                    output += " | ".join(f"{str(val)[:20]:20}" for val in row) + "\n"
+            else:
+                output += "⚠️ No data found in table!\n"
+                output += "\nPossible reasons:\n"
+                output += "  1. Queries were not actually executed\n"
+                output += "  2. Table name mismatch in queries\n"
+                output += "  3. Queries failed silently\n"
+            
+            data_text.insert(1.0, output)
+            data_text.config(state=tk.DISABLED)
+            
+            # Close button
+            tk.Button(content, text="Close", command=verify_dialog.destroy,
+                     bg="#95a5a6", fg="white", font=("Arial", 10),
+                     padx=20, pady=5).pack(pady=10)
+            
+        except Exception as e:
+            tk.messagebox.showerror("Verification Error", 
+                                   f"Failed to verify table data:\n\n{str(e)}",
+                                   parent=parent_dialog)
 
 
 def main():
