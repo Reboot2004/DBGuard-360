@@ -549,7 +549,7 @@ class LogViewerGUI:
         """Show dialog to input new table name and schema"""
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Run Queries on New Table")
-        dialog.geometry("700x550")
+        dialog.geometry("700x600")
         dialog.transient(self.root)
         dialog.grab_set()
         
@@ -671,14 +671,14 @@ class LogViewerGUI:
                 text="Paste the CREATE TABLE statement or describe the table structure:",
                 font=("Arial", 9)).pack(anchor=tk.W, padx=10, pady=(5, 0))
         
-        schema_text = scrolledtext.ScrolledText(schema_frame, height=10, 
+        schema_text = scrolledtext.ScrolledText(schema_frame, height=8, 
                                                 font=("Courier", 9), wrap=tk.WORD)
         schema_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         schema_text.insert(1.0, f"CREATE TABLE {original_table}_new (\n    id INT PRIMARY KEY,\n    -- Add columns here\n);")
         
-        # Buttons
+        # Buttons (make sure they're always visible at bottom)
         button_frame = tk.Frame(content)
-        button_frame.pack(fill=tk.X)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
         
         def on_execute():
             new_table = table_name_entry.get().strip()
