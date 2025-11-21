@@ -833,6 +833,13 @@ class LogViewerGUI:
                     # Execute the modified query
                     cursor.execute(modified_query)
                     
+                    # Fetch all results to clear the cursor (prevents "Unread result found" error)
+                    try:
+                        cursor.fetchall()
+                    except:
+                        # Query doesn't return results (INSERT, UPDATE, DELETE, etc.)
+                        pass
+                    
                     # Get affected rows
                     affected = cursor.rowcount if cursor.rowcount >= 0 else 0
                     
